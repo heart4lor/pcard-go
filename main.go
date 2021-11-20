@@ -1,15 +1,21 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"log"
+	"math/rand"
 	"net/http"
+	"time"
+	"unsafe"
 )
 
+var magic string
 var db *gorm.DB
 func init() {
 	var err error
@@ -22,6 +28,8 @@ func init() {
 	if err != nil {
 		return
 	}
+	rand.Seed(time.Now().UnixNano())
+	//gin.SetMode(gin.ReleaseMode)
 }
 
 type Card struct {
@@ -39,6 +47,7 @@ type History struct {
 
 func main() {
 	router := gin.Default()
+	router.POST("/login", login)
 	router.GET("/card/:code", searchCard)
 	router.POST("/card", activateCard)
 	router.POST("/supply-history", supply)
@@ -49,7 +58,74 @@ func main() {
 	}
 }
 
+func hash(target string) string {
+	h := sha256.New()
+	h.Write([]byte(target))
+	sum := h.Sum(nil)
+	result := hex.EncodeToString(sum)
+	return result
+}
+var src = rand.NewSource(time.Now().UnixNano())
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const (
+	letterIdxBits = 6                    // 6 bits to represent a letter index
+	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+)
+func randStringBytesMaskImpSrcUnsafe(n int) string {
+	b := make([]byte, n)
+	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
+	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = src.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
+	}
+
+	return *(*string)(unsafe.Pointer(&b))
+}
+
+const passwd = "90cc19dfaaecff2ba9f0512d65123764e3c97d4c7335b7ee5c4a841b864ab007"
+func login(c *gin.Context) {
+	body, err := c.GetRawData()
+	if err != nil {
+		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "bad request"})
+		return
+	}
+	s := hash(string(body))
+	if s == passwd {
+		magic = randStringBytesMaskImpSrcUnsafe(32)
+		c.SetCookie("magic", magic, 7200, "/", "sunyongfei.cn", false, false)
+		c.IndentedJSON(http.StatusOK, gin.H{"msg": "登录成功"})
+	} else {
+		c.IndentedJSON(http.StatusTeapot, gin.H{"msg": "密码错误"})
+	}
+}
+
+func checkLogin(c *gin.Context) bool {
+	cookie, err := c.Cookie("magic")
+	if err != nil {
+		log.Print(err)
+		c.IndentedJSON(http.StatusUnauthorized, gin.H{"msg": "请重新登录"})
+		return false
+	} else if cookie != magic {
+		log.Print("magic:", cookie, " refused.")
+		c.IndentedJSON(http.StatusUnauthorized, gin.H{"msg": "请重新登录"})
+		return false
+	} else {
+		return true
+	}
+}
+
 func searchCard(c *gin.Context) {
+	if !checkLogin(c) {
+		return
+	}
 	cardCode := c.Param("code")
 	var existCard Card
 	checkResult := db.First(&existCard, "code = ?", cardCode)
@@ -62,9 +138,13 @@ func searchCard(c *gin.Context) {
 }
 
 func activateCard(c *gin.Context) {
+	if !checkLogin(c) {
+		return
+	}
 	var card Card
 	if err := c.BindJSON(&card); err != nil {
 		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "操作不合法，请检查"})
+		return
 	}
 	var existCard Card
 	checkResult := db.First(&existCard, "code = ?", card.Code)
@@ -85,17 +165,25 @@ func activateCard(c *gin.Context) {
 }
 
 func supply(c *gin.Context) {
+	if !checkLogin(c) {
+		return
+	}
 	var history History
 	if err := c.BindJSON(&history); err != nil {
 		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "操作不合法，请检查"})
+		return
 	}
 	c.IndentedJSON(updateCard(history, "充值"))
 }
 
 func consume(c *gin.Context) {
+	if !checkLogin(c) {
+		return
+	}
 	var history History
 	if err := c.BindJSON(&history); err != nil {
 		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "操作不合法，请检查"})
+		return
 	}
 	history.Money *= -1
 	httpCode, msg := updateCard(history, "消费")
