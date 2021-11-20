@@ -90,14 +90,15 @@ func randStringBytesMaskImpSrcUnsafe(n int) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
 
-const passwd = "90cc19dfaaecff2ba9f0512d65123764e3c97d4c7335b7ee5c4a841b864ab007"
+const passwd = "2b10285dcad70b24121540f8e054ae3e62faa0db63d43734766d958b76f94a49"
 func login(c *gin.Context) {
 	body, err := c.GetRawData()
 	if err != nil {
 		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "bad request"})
 		return
 	}
-	s := hash(string(body))
+	s := hash(hash(string(body)))
+	log.Print("input hashed:", s)
 	if s == passwd {
 		magic = randStringBytesMaskImpSrcUnsafe(32)
 		c.SetCookie("magic", magic, 7200, "/", "sunyongfei.cn", false, false)
