@@ -29,7 +29,7 @@ func init() {
 		return
 	}
 	rand.Seed(time.Now().UnixNano())
-	//gin.SetMode(gin.ReleaseMode)
+	gin.SetMode(gin.ReleaseMode)
 }
 
 type Card struct {
@@ -47,15 +47,22 @@ type History struct {
 
 func main() {
 	router := gin.Default()
-	router.POST("/login", login)
-	router.GET("/card/:code", searchCard)
-	router.POST("/card", activateCard)
-	router.POST("/supply-history", supply)
-	router.POST("/consume-history", consume)
+	router.GET("/api/version", version)
+	router.POST("/api/login", login)
+	router.GET("/api/card/:code", searchCard)
+	router.POST("/api/card", activateCard)
+	router.GET("/api/card/:code/histories", latestHistory)
+	router.POST("/api/supply-history", supply)
+	router.POST("/api/consume-history", consume)
+	router.GET("/api/check-login", checkLoginApiWrapper)
 	err := router.Run("0.0.0.0:8086")
 	if err != nil {
 		return
 	}
+}
+
+func version(c *gin.Context) {
+	c.IndentedJSON(http.StatusOK, gin.H{"version": "20211121"})
 }
 
 func hash(target string) string {
@@ -108,6 +115,11 @@ func login(c *gin.Context) {
 	}
 }
 
+func checkLoginApiWrapper(c *gin.Context) {
+	checkLogin(c)
+	return
+}
+
 func checkLogin(c *gin.Context) bool {
 	cookie, err := c.Cookie("magic")
 	if err != nil {
@@ -121,6 +133,16 @@ func checkLogin(c *gin.Context) bool {
 	} else {
 		return true
 	}
+}
+
+func latestHistory(c *gin.Context) {
+	if !checkLogin(c) {
+		return
+	}
+	cardCode := c.Param("code")
+	var histories []History
+	db.Where("card = ?", cardCode).Order("ID desc").Limit(10).Find(&histories)
+	c.IndentedJSON(http.StatusOK, histories)
 }
 
 func searchCard(c *gin.Context) {
@@ -147,6 +169,14 @@ func activateCard(c *gin.Context) {
 		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "操作不合法，请检查"})
 		return
 	}
+	if len(card.Code) != 6 {
+		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "卡号位数不对，请输入6位"})
+		return
+	}
+	if card.Deposit == 0 {
+		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "金额不能为0元"})
+		return
+	}
 	var existCard Card
 	checkResult := db.First(&existCard, "code = ?", card.Code)
 	if errors.Is(checkResult.Error, gorm.ErrRecordNotFound) {
@@ -154,6 +184,8 @@ func activateCard(c *gin.Context) {
 		createResult := db.Create(&Card{Code: card.Code, Deposit: card.Deposit, Phone: card.Phone})
 		if createResult.Error == nil {
 			// 成功
+			history := History{Card: card.Code, Money: card.Deposit}
+			db.Create(&history)
 			c.IndentedJSON(http.StatusCreated, gin.H{"msg": fmt.Sprintf("开卡成功，卡号：%s，余额：%d", card.Code, card.Deposit)})
 		} else {
 			// 数据库插入失败
@@ -174,7 +206,12 @@ func supply(c *gin.Context) {
 		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "操作不合法，请检查"})
 		return
 	}
-	c.IndentedJSON(updateCard(history, "充值"))
+	if history.Money < 0 {
+		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "金额不能为负"})
+		return
+	}
+	httpStatusCode, msg := updateCard(history, "充值")
+	c.IndentedJSON(httpStatusCode, gin.H{"msg": msg})
 }
 
 func consume(c *gin.Context) {
@@ -186,12 +223,19 @@ func consume(c *gin.Context) {
 		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "操作不合法，请检查"})
 		return
 	}
+	if history.Money < 0 {
+		c.IndentedJSON(http.StatusBadRequest, gin.H{"msg": "金额不能为负"})
+		return
+	}
 	history.Money *= -1
-	httpCode, msg := updateCard(history, "消费")
-	c.IndentedJSON(httpCode, gin.H{"msg": msg})
+	httpStatusCode, msg := updateCard(history, "消费")
+	c.IndentedJSON(httpStatusCode, gin.H{"msg": msg})
 }
 
 func updateCard(history History, operation string) (int, string) {
+	if history.Money == 0 {
+		return http.StatusBadRequest, "金额不能为0元"
+	}
 	var card Card
 	checkResult := db.First(&card, "code = ?", history.Card)
 	if errors.Is(checkResult.Error, gorm.ErrRecordNotFound) {
@@ -204,6 +248,6 @@ func updateCard(history History, operation string) (int, string) {
 		log.Printf("card:%s %+d", history.Card, history.Money)
 		db.Create(&history)
 		db.Model(&card).Update("deposit", gorm.Expr("deposit + ?", history.Money))
-		return http.StatusOK, operation + "成功"
+		return http.StatusOK, fmt.Sprintf("%s成功，卡号：%s 剩余 %d 元", operation, card.Code, card.Deposit + history.Money)
 	}
 }
